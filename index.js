@@ -1,4 +1,4 @@
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
 const path = require('path');
 
@@ -13,12 +13,50 @@ if (!BOT_TOKEN) {
 const bot = new Telegraf(BOT_TOKEN);
 
 const QUESTIONS = [
-  { key: 'route', text: 'Откуда и куда везём груз? (страна/город отправления и назначения)' },
+  {
+    key: 'route',
+    text:
+      'Откуда забираем груз и куда доставляем? Укажите город/страну отправления и город назначения в России. ' +
+      'Если знаете условия поставки (Incoterms, например FCA/EXW/CIF) — укажите тоже.',
+  },
+  {
+    key: 'hs_sanctions',
+    text:
+      'Код ТН ВЭД груза (если знаете) и подтвердите — груз санкционный или нет?\n' +
+      'Пример: «84369900, не санкционный». Если код не знаете — напишите «не знаю».',
+  },
+  {
+    key: 'delivery_type',
+    text: 'Каким видом доставки планируете везти груз?',
+    options: ['Море', 'Море + ЖД', 'ЖД', 'Авиа'],
+  },
+  {
+    key: 'consolidation',
+    text: 'Как отправляем: сборным грузом (вместе с другими) или отдельным контейнером? Если морем не едем — выберите «Не важно».',
+    options: ['Сборный груз', 'Отдельный контейнер', 'Не важно'],
+  },
   { key: 'cargo', text: 'Что за груз? (категория товара, хрупкий или нет)' },
-  { key: 'volume', text: 'Примерный объём или вес? (кубы или кг)' },
+  {
+    key: 'places',
+    text:
+      'Сколько мест груза, в какой упаковке и какого размера? Укажите количество и тип (палеты, бухты, ящики), ' +
+      'размеры одного места (Д×Ш×В, см) и вес, если знаете.\n' +
+      'Пример: 7 палет 115×115×240 см + 2 бухты.',
+  },
   { key: 'timing', text: 'Когда груз будет готов к отправке?' },
   { key: 'customs_experience', text: 'Был ли уже опыт растаможки этого товара? (да / нет / не уверен)' },
 ];
+
+function questionKeyboard(question) {
+  if (!question.options) return Markup.removeKeyboard();
+  return Markup.keyboard(question.options, { columns: 2 })
+    .resize()
+    .oneTime();
+}
+
+async function askQuestion(ctx, question) {
+  await ctx.reply(question.text, questionKeyboard(question));
+}
 
 const sessions = new Map();
 
@@ -48,20 +86,23 @@ function formatLead(from, answers) {
   return (
     `<b>Новая заявка на расчёт логистики</b>\n\n` +
     `Откуда/куда: ${answers.route}\n` +
+    `ТН ВЭД / санкционность: ${answers.hs_sanctions}\n` +
+    `Вид доставки: ${answers.delivery_type}\n` +
+    `Способ отправки: ${answers.consolidation}\n` +
     `Груз: ${answers.cargo}\n` +
-    `Объём/вес: ${answers.volume}\n` +
+    `Места и размеры: ${answers.places}\n` +
     `Сроки: ${answers.timing}\n` +
     `Опыт растаможки: ${answers.customs_experience}\n\n` +
     `Контакт: ${from.username ? '@' + from.username : from.first_name} (id: ${from.id})`
   );
 }
 
-bot.start((ctx) => {
+bot.start(async (ctx) => {
   startSession(ctx.chat.id);
-  ctx.reply(
-    'Здравствуйте! Помогу оформить заявку на расчёт доставки груза — отвечу на несколько коротких вопросов.\n\n' +
-      QUESTIONS[0].text
+  await ctx.reply(
+    'Здравствуйте! Помогу оформить заявку на расчёт доставки груза — отвечу на несколько коротких вопросов.'
   );
+  await askQuestion(ctx, QUESTIONS[0]);
 });
 
 bot.command('cancel', (ctx) => {
@@ -79,18 +120,30 @@ bot.on('text', async (ctx) => {
   if (!session) {
     startSession(chatId);
     session = sessions.get(chatId);
-    await ctx.reply(
-      'Начнём с заявки на расчёт доставки.\n\n' + QUESTIONS[0].text
-    );
+    await ctx.reply('Начнём с заявки на расчёт доставки.');
+    await askQuestion(ctx, QUESTIONS[0]);
     return;
   }
 
   const currentQuestion = QUESTIONS[session.step];
-  session.answers[currentQuestion.key] = text;
+
+  if (currentQuestion.options) {
+    const match = currentQuestion.options.find(
+      (opt) => opt.toLowerCase() === text.toLowerCase()
+    );
+    if (!match) {
+      await ctx.reply('Пожалуйста, выберите один из вариантов на клавиатуре ниже.');
+      await askQuestion(ctx, currentQuestion);
+      return;
+    }
+    session.answers[currentQuestion.key] = match;
+  } else {
+    session.answers[currentQuestion.key] = text;
+  }
   session.step += 1;
 
   if (session.step < QUESTIONS.length) {
-    await ctx.reply(QUESTIONS[session.step].text);
+    await askQuestion(ctx, QUESTIONS[session.step]);
     return;
   }
 
@@ -109,7 +162,8 @@ bot.on('text', async (ctx) => {
   const summary = formatLead(ctx.from, session.answers);
 
   await ctx.replyWithHTML(
-    'Спасибо! Заявка записана:\n\n' + summary + '\n\nОтветим в течение дня.'
+    'Спасибо! Заявка записана:\n\n' + summary + '\n\nОтветим в течение дня.',
+    Markup.removeKeyboard()
   );
 
   if (ADMIN_CHAT_ID) {
